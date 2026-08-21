@@ -9,6 +9,7 @@ import unicodedata
 from html import escape
 from pathlib import Path
 from typing import Any
+from datetime import datetime
 
 import re
 import requests
@@ -235,6 +236,21 @@ def resolve_glpi_status(jira_status_name: str) -> int:
 
     return GLPI_STATUS_MAP[status_key]
 
+def format_jira_datetime(value: str) -> str:
+    """Converte datetime ISO do Jira para formato brasileiro."""
+    if not value:
+        return "Não informado"
+
+    try:
+        dt = datetime.fromisoformat(
+            value.replace("Z", "+00:00")
+        )
+
+        return dt.strftime("%d/%m/%Y %H:%M:%S")
+
+    except ValueError:
+        return value
+
 
 # =============================================================================
 # ESTADO LOCAL / IDEMPOTÊNCIA
@@ -317,19 +333,101 @@ def get_jira_issue(session: Session) -> dict[str, Any]:
         session,
         f"/rest/api/3/issue/{JIRA_KEY}",
         params={
-            "fields": "summary,description,attachment,status,priority",
+            "fields": "summary,description,attachment,status,priority,created",
             "expand": "renderedFields",
         },
     )
     save_json(JIRA_JSON_FILE, issue)
     return issue
 
+def request_field_value_to_text(value: Any) -> str:
+    """
+    Converte valores de campos do Jira Service Management
+    para uma representação textual simples.
+    """
+    if value is None:
+        return ""
+
+    if isinstance(value, str):
+        return value.strip()
+
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+
+    if isinstance(value, list):
+        values = [
+            request_field_value_to_text(item)
+            for item in value
+        ]
+
+        return ", ".join(
+            item for item in values if item
+        )
+
+    if isinstance(value, dict):
+        # Campos de lista/dropdown do Jira costumam vir
+        # em um desses formatos.
+        for key in (
+            "value",
+            "name",
+            "label",
+            "displayName",
+        ):
+            candidate = value.get(key)
+
+            if candidate not in (None, ""):
+                return request_field_value_to_text(
+                    candidate
+                )
+
+        # Fallback seguro para algum tipo de campo
+        # ainda não encontrado durante os testes.
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+        )
+
+    return str(value)
+
+
+def get_request_field(
+    request_data: dict[str, Any],
+    field_name: str,
+) -> str:
+    """
+    Localiza um campo da solicitação pelo label,
+    sem depender de customfield_xxxxx.
+    """
+    target = normalize_text(field_name)
+
+    for field in (
+        request_data.get("requestFieldValues") or []
+    ):
+        label = normalize_text(
+            field.get("label") or ""
+        )
+
+        if label == target:
+            return request_field_value_to_text(
+                field.get("value")
+            )
+
+    return ""
 
 def get_jira_request_info(session: Session) -> dict[str, str]:
     """Lê tipo da solicitação e requerente no Jira Service Management."""
     request_data = jira_get_json(
         session,
         f"/rest/servicedeskapi/request/{JIRA_KEY}",
+    )
+    sector = get_request_field(
+        request_data,
+        "Setor",
+    )
+
+    branch = get_request_field(
+        request_data,
+        "Filial",
     )
 
     service_desk_id = str(request_data["serviceDeskId"])
@@ -352,6 +450,8 @@ def get_jira_request_info(session: Session) -> dict[str, str]:
         "reporter_account_id": reporter.get("accountId") or "",
         "reporter_name": reporter.get("displayName") or "",
         "reporter_email": reporter.get("emailAddress") or "",
+        "sector": sector,
+        "branch": branch,
     }
 
 
@@ -1027,6 +1127,10 @@ def main() -> int:
         status = (fields.get("status") or {}).get("name") or ""
         attachments = fields.get("attachment") or []
         jira_priority_name = (fields.get("priority") or {}).get("name") or ""
+        jira_created = fields.get("created") or ""
+        jira_created_formatted = format_jira_datetime(
+            jira_created
+        )
         description_html = get_jira_description_html(issue)
 
         request_info = get_jira_request_info(jira_session)
@@ -1045,6 +1149,7 @@ def main() -> int:
         )
 
         print(f"Jira........: {JIRA_KEY}")
+        print(f"Abertura Jira: {jira_created_formatted}")
         print(f"Status......: {status}")
         print(f"Título......: {summary}")
         print(f"Anexos......: {len(attachments)}")
