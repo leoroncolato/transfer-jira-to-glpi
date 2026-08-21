@@ -85,6 +85,35 @@ GLPI_PRIORITY_MAP = {
     "muito alto": 5,
 }
 
+GLPI_STATUS_MAP = {
+    "novo": 1,
+    "aberto": 1,
+
+    "em andamento": 2,
+    "aguardando pelo suporte": 2,
+
+    "aguardando cliente": 4,
+    "itens pendentes": 4,
+    "pendente": 4,
+
+    "resolvido": 5,
+    "solucionado": 5,
+
+    "fechado": 6,
+    "encerrado": 6,
+    "cancelado": 6,
+    "cancelar solicitacao": 6,
+}
+
+GLPI_STATUS_LABELS = {
+    1: "Novo",
+    2: "Em atendimento (atribuído)",
+    3: "Em atendimento (planejado)",
+    4: "Pendente",
+    5: "Solucionado",
+    6: "Fechado",
+}
+
 EMAIL_QUOTE_PATTERNS = [
     re.compile(
         r"^\s*Em\s+\d{1,2}/\d{1,2}/\d{4}\s+.+?\s+escreveu:\s*$",
@@ -193,6 +222,18 @@ def adf_to_plain(node: Any) -> str:
         output += "\n"
 
     return output
+
+def resolve_glpi_status(jira_status_name: str) -> int:
+    """Converte o status Jira para o status equivalente do GLPI."""
+    status_key = normalize_text(jira_status_name)
+
+    if status_key not in GLPI_STATUS_MAP:
+        raise RuntimeError(
+            f"Status Jira sem mapeamento para o GLPI: "
+            f"'{jira_status_name}'."
+        )
+
+    return GLPI_STATUS_MAP[status_key]
 
 
 # =============================================================================
@@ -680,6 +721,7 @@ def sync_glpi_ticket(
     content: str,
     category_id: int,
     priority: int,
+    status_id: int,
 ) -> int:
     """Cria o ticket ou atualiza o ticket já registrado no estado."""
     ticket_id = state.get("glpi_ticket_id")
@@ -690,6 +732,7 @@ def sync_glpi_ticket(
         "entities_id": GLPI_ENTITY_ID,
         "priority": priority,
         "itilcategories_id": category_id,
+        "status": status_id,
     }
 
     if ticket_id:
@@ -842,6 +885,32 @@ def transfer_attachments_to_glpi(
         save_state(state)
 
         print(f"Documento {document_id} vinculado ao ticket {ticket_id}.")
+
+def enforce_glpi_ticket_status(
+    session: Session,
+    ticket_id: int,
+    status_id: int,
+) -> None:
+    """Garante o status final esperado após toda a migração."""
+
+    glpi_request(
+        session,
+        "PUT",
+        f"Ticket/{ticket_id}",
+        f"ajuste final do status do ticket {ticket_id}",
+        json={
+            "input": {
+                "id": ticket_id,
+                "status": status_id,
+            }
+        },
+        timeout=REQUEST_TIMEOUT,
+    )
+
+    print(
+        f"Status final.: GLPI {status_id} "
+        f"({GLPI_STATUS_LABELS[status_id]})"
+    )
 
 
 def import_jira_comments(
@@ -1018,9 +1087,15 @@ def main() -> int:
             request_type_name,
         )
         priority = resolve_glpi_priority(jira_priority_name)
+        glpi_status = resolve_glpi_status(status)
 
         print(f"Categoria...: {request_type_name} -> GLPI {category_id}")
         print(f"Prioridade..: {jira_priority_name} -> GLPI {priority}")
+        print(
+            f"Status......: {status} -> "
+            f"GLPI {glpi_status} "
+            f"({GLPI_STATUS_LABELS[glpi_status]})"
+        )
 
         ticket_id = sync_glpi_ticket(
             glpi_session,
@@ -1029,6 +1104,7 @@ def main() -> int:
             content=description_for_glpi,
             category_id=category_id,
             priority=priority,
+            status_id=glpi_status,
         )
 
         ensure_glpi_requester(glpi_session, ticket_id)
@@ -1047,6 +1123,13 @@ def main() -> int:
             ticket_id,
             comments,
             state,
+        )
+
+        section("8. AJUSTANDO STATUS FINAL")
+        enforce_glpi_ticket_status(
+            glpi_session,
+            ticket_id,
+            glpi_status,
         )
 
         section("PILOTO CONCLUÍDO")
