@@ -2,8 +2,9 @@ import os
 import sys
 import json
 from pathlib import Path
-
 import requests
+from html import escape
+
 
 
 JIRA_BASE = os.environ["JIRA_BASE_URL"].rstrip("/")
@@ -12,9 +13,19 @@ JIRA_TOKEN = os.environ["JIRA_API_TOKEN"]
 JIRA_KEY = os.environ["JIRA_ISSUE_KEY"]
 
 GLPI_BASE = os.environ["GLPI_BASE_URL"].rstrip("/")
+GLPI_API = f"{GLPI_BASE}/api.php/v1"
 GLPI_APP_TOKEN = os.environ["GLPI_APP_TOKEN"]
 GLPI_USER_TOKEN = os.environ["GLPI_USER_TOKEN"]
 GLPI_ENTITY_ID = int(os.environ["GLPI_ENTITY_ID"])
+GLPI_JIRA_USER_ID = os.environ["GLPI_JIRA_USER_ID"]
+GLPI_PRIORITY_MAP = {
+    "baixa": 2,
+    "média": 3,
+    "media": 3,
+    "alta": 4,
+    "muito alta": 5,
+}
+
 
 DRY_RUN = os.environ.get("DRY_RUN", "1") == "1"
 
@@ -23,6 +34,9 @@ ALLOWED_STATUSES = {
     "em andamento",
     "itens pendentes",
 }
+
+
+#==============================================================INÍCIO DO ESCOPO DE FUNÇÕES==============================================================
 
 
 def normalize_status(value):
@@ -79,7 +93,7 @@ def load_state():
         return {
             "jira_key": JIRA_KEY,
             "glpi_ticket_id": None,
-            "uploaded_attachments": [],
+            "uploaded_attachments": {},
         }
 
     with STATE_FILE.open("r", encoding="utf-8") as f:
@@ -96,6 +110,66 @@ def save_state(state):
         )
 
 
+
+def check_response(response, operation):
+    if response.ok:
+        return
+
+    print()
+    print("=" * 70)
+    print(f"ERRO GLPI: {operation}")
+    print("=" * 70)
+    print(f"HTTP........: {response.status_code}")
+    print(f"URL.........: {response.url}")
+    print(
+        "Content-Type:",
+        response.headers.get("Content-Type")
+    )
+
+    try:
+        print("Resposta:")
+        print(response.text[:3000])
+    except Exception:
+        pass
+
+    response.raise_for_status()
+
+
+def jira_get_json(path, params=None):
+    response = requests.get(
+        f"{JIRA_BASE}{path}",
+        auth=(JIRA_EMAIL, JIRA_TOKEN),
+        headers={
+            "Accept": "application/json",
+        },
+        params=params,
+        timeout=60,
+    )
+
+    if not response.ok:
+        print()
+        print("=" * 70)
+        print("ERRO DE LEITURA DO JIRA")
+        print("=" * 70)
+        print(f"HTTP........: {response.status_code}")
+        print(f"URL.........: {response.url}")
+        print(response.text[:2000])
+        response.raise_for_status()
+
+    return response.json()
+
+#==============================================================FIM DO ESCOPO DE FUNÇÕES==============================================================
+
+
+
+
+
+
+
+
+#==============================================================INÍCIO DA CHAMADA DAS FUNÇÕES==============================================================
+
+
 print("=" * 70)
 print("1. LENDO CHAMADO DO JIRA")
 print("=" * 70)
@@ -109,8 +183,8 @@ jira_response = requests.get(
         "Accept": "application/json",
     },
     params={
-        "fields": "summary,description,attachment,status",
-        "expand": "renderedFields",
+    "fields": "summary,description,attachment,status,priority",
+    "expand": "renderedFields",
     },
     timeout=60,
 )
@@ -144,6 +218,8 @@ if not description_html:
     )
 
 attachments = issue["fields"].get("attachment") or []
+priority_obj = issue["fields"].get("priority") or {}
+jira_priority_name = priority_obj.get("name") or ""
 
 print(f"Jira........: {JIRA_KEY}")
 print(f"Status......: {status}")
@@ -152,6 +228,7 @@ print(f"Anexos......: {len(attachments)}")
 print(
     f"Descrição...: {len(description_html)} caracteres"
 )
+print(f"Prioridade...: {jira_priority_name}")
 
 normalized_status = normalize_status(status)
 
@@ -341,7 +418,10 @@ try:
             timeout=60,
         )
 
-        response.raise_for_status()
+        check_response(
+            response,
+            "criação do Ticket"
+        )
 
         result = response.json()
 
@@ -360,19 +440,20 @@ try:
     print("6. TRANSFERINDO ANEXOS PARA O GLPI")
     print("=" * 70)
 
-    uploaded_ids = set(
-        state.get("uploaded_attachments", [])
-    )
+    uploaded_attachments = state.setdefault("uploaded_attachments", {})
+    
 
     for attachment in downloaded:
         jira_attachment_id = (
             attachment["jira_attachment_id"]
         )
 
-        if jira_attachment_id in uploaded_ids:
+        if jira_attachment_id in uploaded_attachments:
             print(
                 f"SKIP: Jira attachment "
                 f"{jira_attachment_id} já transferido."
+                f"como GLPI Document "
+                f"{uploaded_attachments[jira_attachment_id]}"
             )
             continue
 
@@ -383,6 +464,7 @@ try:
         manifest = {
             "input": {
                 "name": filename,
+                "entities_id": GLPI_ENTITY_ID,
                 "_filename": [filename],
             }
         }
@@ -415,7 +497,10 @@ try:
                 timeout=120,
             )
 
-        upload_response.raise_for_status()
+        check_response(
+            upload_response,
+            f"upload do documento {filename}"
+        )
 
         upload_result = upload_response.json()
         document_id = upload_result["id"]
@@ -443,12 +528,15 @@ try:
             timeout=60,
         )
 
-        link_response.raise_for_status()
+        check_response(
+            link_response,
+            f"vínculo do documento {filename}"
+        )
 
         state.setdefault(
             "uploaded_attachments",
-            [],
-        ).append(jira_attachment_id)
+            {},
+        )[jira_attachment_id] = document_id
 
         save_state(state)
 
@@ -456,6 +544,11 @@ try:
             f"Documento vinculado ao ticket "
             f"{ticket_id}"
         )
+
+        uploaded_attachments[jira_attachment_id] = document_id
+        save_state(state)
+
+    
 
 
     print()
