@@ -635,18 +635,49 @@ def build_glpi_description(
     description_html: str,
     reporter_name: str,
     reporter_email: str,
+    jira_created: str,
+    sector: str,
+    branch: str,
 ) -> str:
-    """Monta a descrição final enviada ao GLPI."""
-    reporter_display = reporter_name or "Não informado"
+    """Monta o cabeçalho histórico do Jira no GLPI."""
+
+    reporter_display = (
+        reporter_name or "Não informado"
+    )
+
     if reporter_email:
-        reporter_display += f" — {reporter_email}"
+        reporter_display += (
+            f" — {reporter_email}"
+        )
+
+    sector_display = (
+        sector or "Não informado"
+    )
+
+    branch_display = (
+        branch or "Não informado"
+    )
 
     return (
         "<p>"
-        f"<strong>Importado do Jira:</strong> {escape(JIRA_KEY)}<br>"
-        f"<strong>Requerente original:</strong> {escape(reporter_display)}"
+        f"<strong>Importado do Jira:</strong> "
+        f"{escape(JIRA_KEY)}<br>"
+
+        f"<strong>Data de abertura no Jira:</strong> "
+        f"{escape(jira_created)}<br>"
+
+        f"<strong>Requerente original:</strong> "
+        f"{escape(reporter_display)}<br>"
+
+        f"<strong>Setor:</strong> "
+        f"{escape(sector_display)}<br>"
+
+        f"<strong>Filial:</strong> "
+        f"{escape(branch_display)}"
         "</p>"
+
         "<hr>"
+
         f"{description_html}"
     )
 
@@ -1137,6 +1168,8 @@ def main() -> int:
         request_type_name = request_info["request_type_name"]
         reporter_name = request_info["reporter_name"]
         reporter_email = request_info["reporter_email"]
+        sector = request_info["sector"]
+        branch = request_info["branch"]
         comments = get_jira_comments(jira_session)
         save_json(JIRA_COMMENTS_FILE, comments)
 
@@ -1159,7 +1192,20 @@ def main() -> int:
         print(f"Requerente..: {reporter_name}")
         print(f"E-mail......: {reporter_email}")
         print(f"Comentários.: {len(comments)}")
+        print(
+            f"Setor.......: "
+            f"{sector or 'Não informado'}"
+        )
 
+        print(
+            f"Filial......: "
+            f"{branch or 'Não informado'}"
+        )
+
+        print(
+            f"Abertura....: "
+            f"{jira_created_formatted}"
+        )
         section("2. BAIXANDO ANEXOS DO JIRA")
         downloaded = download_jira_attachments(jira_session, attachments)
 
