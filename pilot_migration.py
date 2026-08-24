@@ -45,6 +45,8 @@ JIRA_BASE = require_env("JIRA_BASE_URL").rstrip("/")
 JIRA_EMAIL = require_env("JIRA_EMAIL")
 JIRA_TOKEN = require_env("JIRA_API_TOKEN")
 JIRA_KEY = require_env("JIRA_ISSUE_KEY")
+JIRA_SECTOR_FIELD_ID = "customfield_10154"
+JIRA_BRANCH_FIELD_ID = "customfield_10119"
 
 GLPI_BASE = require_env("GLPI_BASE_URL").rstrip("/")
 GLPI_REST_API = os.environ.get(
@@ -72,7 +74,8 @@ ALLOWED_STATUSES = {
     "em andamento",
     "itens pendentes",
     "resolvido",
-    "fechado"
+    "fechado",
+    "concluida"
 }
 
 GLPI_PRIORITY_MAP = {
@@ -99,6 +102,7 @@ GLPI_STATUS_MAP = {
 
     "resolvido": 5,
     "solucionado": 5,
+    "concluida": 5,
 
     "fechado": 6,
     "encerrado": 6,
@@ -328,17 +332,32 @@ def jira_get_json(
 
 
 def get_jira_issue(session: Session) -> dict[str, Any]:
-    """Lê os campos principais do chamado."""
+    """Lê os campos principais e metadados internos do chamado."""
+
+    requested_fields = [
+        "summary",
+        "description",
+        "attachment",
+        "status",
+        "priority",
+        "created",
+        JIRA_SECTOR_FIELD_ID,
+        JIRA_BRANCH_FIELD_ID,
+    ]
+
     issue = jira_get_json(
         session,
         f"/rest/api/3/issue/{JIRA_KEY}",
         params={
-            "fields": "summary,description,attachment,status,priority,created",
+            "fields": ",".join(requested_fields),
             "expand": "renderedFields",
         },
     )
+
     save_json(JIRA_JSON_FILE, issue)
     return issue
+
+
 
 def request_field_value_to_text(value: Any) -> str:
     """
@@ -864,6 +883,7 @@ def sync_glpi_ticket(
         "priority": priority,
         "itilcategories_id": category_id,
         "status": status_id,
+        "externalid": JIRA_KEY,
     }
 
     if ticket_id:
@@ -1168,8 +1188,26 @@ def main() -> int:
         request_type_name = request_info["request_type_name"]
         reporter_name = request_info["reporter_name"]
         reporter_email = request_info["reporter_email"]
-        sector = request_info["sector"]
-        branch = request_info["branch"]
+        sector_raw = fields.get(
+            JIRA_SECTOR_FIELD_ID
+        )
+        branch_raw = fields.get(
+            JIRA_BRANCH_FIELD_ID
+        )
+        sector = request_field_value_to_text(
+            sector_raw
+        )
+        branch = request_field_value_to_text(
+            branch_raw
+        )
+        # Fallback para chamados em que eventualmente esses dados
+        # apareçam no formulário do JSM em vez dos campos internos.
+        if not sector:
+            sector = request_info.get("sector", "")
+
+        if not branch:
+            branch = request_info.get("branch", "")
+
         comments = get_jira_comments(jira_session)
         save_json(JIRA_COMMENTS_FILE, comments)
 
@@ -1179,6 +1217,9 @@ def main() -> int:
             description_html,
             reporter_name,
             reporter_email,
+            jira_created_formatted,
+            sector,
+            branch,
         )
 
         print(f"Jira........: {JIRA_KEY}")
@@ -1192,6 +1233,8 @@ def main() -> int:
         print(f"Requerente..: {reporter_name}")
         print(f"E-mail......: {reporter_email}")
         print(f"Comentários.: {len(comments)}")
+        print(f"RAW Setor...: {sector_raw!r}")#temporario--------------------------------------------------------------------
+        print(f"RAW Filial..: {branch_raw!r}")#temporario--------------------------------------------------------------------
         print(
             f"Setor.......: "
             f"{sector or 'Não informado'}"
@@ -1201,7 +1244,6 @@ def main() -> int:
             f"Filial......: "
             f"{branch or 'Não informado'}"
         )
-
         print(
             f"Abertura....: "
             f"{jira_created_formatted}"
