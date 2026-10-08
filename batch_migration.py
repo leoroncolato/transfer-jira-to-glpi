@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 import requests
+import unicodedata
 
 ROOT = Path(__file__).resolve().parent
 PILOT_SCRIPT = ROOT / "pilot_migration.py"
@@ -34,10 +35,6 @@ JIRA_TOKEN = require_env("JIRA_API_TOKEN")
 DEFAULT_JQL = (
     'project = TAREFA '
     'AND statusCategory = Done '
-    'AND status NOT IN ('
-    '"Cancelar Solicitação", '
-    '"Cancelado"'
-    ') '
     'ORDER BY key ASC'
 )
 BATCH_JQL = os.environ.get("BATCH_JQL", DEFAULT_JQL).strip()
@@ -54,6 +51,37 @@ REPORT_FIELDS = [
     "attachments","comments","skipped_comments","recovered_existing",
     "duration_seconds","timestamp",
 ]
+CANCELLED_STATUSES = {
+    "cancelado",
+    "cancelar solicitacao",
+}
+
+BATCH_ONLY_NEW = (
+    os.environ.get(
+        "BATCH_ONLY_NEW",
+        "1",
+    ).strip()
+    == "1"
+)
+
+def normalize_text(value: Any) -> str:
+    text = " ".join(
+        str(value or "")
+        .strip()
+        .casefold()
+        .split()
+    )
+
+    normalized = unicodedata.normalize(
+        "NFKD",
+        text,
+    )
+
+    return "".join(
+        char
+        for char in normalized
+        if not unicodedata.combining(char)
+    )
 
 def build_jira_session() -> requests.Session:
     s = requests.Session()
