@@ -38,6 +38,8 @@ $env:GLPI_ENTITY_ID="0"
 # Usuário técnico "jira"
 $env:GLPI_JIRA_USER_ID=""
 
+$env:GLPI_CATEGORY_FALLBACK_NAME="Importacao Jira - Sem tipo JSM"
+
 Remove-Item Env:\GLPI_TARGET_TICKET_ID -ErrorAction SilentlyContinue
 
 # ============================================================
