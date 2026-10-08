@@ -130,9 +130,15 @@ def load_ticket_state(jira_key: str) -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+        state = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"Falha ao ler o estado existente em {path}. "
+            "Descoberta interrompida para evitar duplicidade no GLPI."
+        ) from exc
+    if not isinstance(state, dict):
+        raise RuntimeError(f"Estado inválido em {path}: esperado objeto JSON.")
+    return state
 
 def save_reports(results: list[dict[str, Any]]) -> None:
     tjson = JSON_REPORT.with_suffix(".json.tmp")
@@ -193,6 +199,7 @@ def main() -> int:
         print('\nBLOQUEADO: DRY_RUN=0 exige $env:BATCH_CONFIRM="MIGRAR"')
         return 20
     s = build_jira_session()
+    issues = search_jira_issues(s)
 
     eligible: list[
         dict[str, Any]
@@ -353,18 +360,18 @@ def main() -> int:
         f"{len(filtered)}"
     )
     
-    for n, issue in enumerate(selected, 1):
+    for n, issue in enumerate(filtered, 1):
         fields = issue.get("fields") or {}; status = (fields.get("status") or {}).get("name") or ""
         print(f"{n:03d}. {issue.get('key')} | {status} | {fields.get('summary') or ''}")
     if DISCOVERY_ONLY:
         print("\nSomente descoberta.\nNenhuma migração executada.")
         return 0
-    if not selected:
+    if not filtered:
         print("Nenhum chamado elegível."); return 0
     results: list[dict[str, Any]] = []
     try:
-        for n, issue in enumerate(selected, 1):
-            print(f"\n[{n}/{len(selected)}]")
+        for n, issue in enumerate(filtered, 1):
+            print(f"\n[{n}/{len(filtered)}]")
             result = run_single_issue(issue)
             results.append(result); save_reports(results)
             if result["result"] != "OK":
