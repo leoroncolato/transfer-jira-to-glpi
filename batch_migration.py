@@ -109,6 +109,22 @@ def search_jira_issues(session: requests.Session) -> list[dict[str, Any]]:
             break
     return issues
 
+def ticket_already_migrated(
+    jira_key: str,
+) -> bool:
+    state = load_ticket_state(
+        jira_key
+    )
+
+    if not state:
+        return False
+
+    return bool(
+        state.get(
+            "glpi_ticket_id"
+        )
+    )
+
 def load_ticket_state(jira_key: str) -> dict[str, Any]:
     path = PILOT_DATA_DIR / jira_key / "state.json"
     if not path.exists():
@@ -162,6 +178,10 @@ def main() -> int:
     if not PILOT_SCRIPT.exists():
         raise RuntimeError(f"Arquivo não encontrado: {PILOT_SCRIPT}")
     print("="*78); print("MIGRAÇÃO JIRA -> GLPI EM LOTE"); print("="*78)
+    print(
+    f"BATCH_ONLY_NEW........: "
+    f"{BATCH_ONLY_NEW}"
+    )
     print("\nJQL:\n" + BATCH_JQL)
     print(f"\nDRY_RUN..............: {DRY_RUN}")
     print(f"DISCOVERY_ONLY.......: {DISCOVERY_ONLY}")
@@ -173,14 +193,166 @@ def main() -> int:
         print('\nBLOQUEADO: DRY_RUN=0 exige $env:BATCH_CONFIRM="MIGRAR"')
         return 20
     s = build_jira_session()
-    try:
-        issues = search_jira_issues(s)
-    finally:
-        s.close()
-    selected = [i for i in issues if str(i.get("key") or "").upper() not in EXCLUDE_KEYS]
+
+    eligible: list[
+        dict[str, Any]
+    ] = []
+
+    cancelled: list[
+        dict[str, Any]
+    ] = []
+
+    already_migrated: list[
+        dict[str, Any]
+    ] = []
+
+    new_issues: list[
+        dict[str, Any]
+    ] = []
+
+
+    for issue in issues:
+        jira_key = str(
+            issue.get("key")
+            or ""
+        ).upper()
+
+        fields = (
+            issue.get("fields")
+            or {}
+        )
+
+        status_obj = (
+            fields.get("status")
+            or {}
+        )
+
+        status_name = (
+            status_obj.get("name")
+            or ""
+        )
+
+        status_category = (
+            status_obj.get(
+                "statusCategory"
+            )
+            or {}
+        )
+
+        category_key = normalize_text(
+            status_category.get("key")
+            or ""
+        )
+
+
+        # -----------------------------------------
+        # Exclusão manual por Jira Key
+        # -----------------------------------------
+
+        if jira_key in EXCLUDE_KEYS:
+            continue
+
+
+        # -----------------------------------------
+        # Proteção contra Cancelados
+        # -----------------------------------------
+
+        if (
+            normalize_text(status_name)
+            in CANCELLED_STATUSES
+        ):
+            cancelled.append(
+                issue
+            )
+            continue
+
+
+        # -----------------------------------------
+        # Defesa adicional:
+        # somente statusCategory = done
+        # -----------------------------------------
+
+        if (
+            category_key
+            and category_key != "done"
+        ):
+            continue
+
+
+        eligible.append(
+            issue
+        )
+
+
+        # -----------------------------------------
+        # Verifica se já existe no GLPI
+        # -----------------------------------------
+
+        if ticket_already_migrated(
+            jira_key
+        ):
+            already_migrated.append(
+                issue
+            )
+
+        else:
+            new_issues.append(
+                issue
+            )
+
+
+    # ============================================================
+    # ESCOLHA DO LOTE
+    # ============================================================
+
+    if BATCH_ONLY_NEW:
+        filtered = new_issues
+
+    else:
+        filtered = eligible
+
+
     if BATCH_LIMIT > 0:
-        selected = selected[:BATCH_LIMIT]
-    print(f"\nChamados encontrados: {len(issues)}\nChamados selecionados: {len(selected)}\n")
+        filtered = filtered[
+            :BATCH_LIMIT
+        ]
+
+    
+    print()
+    print("=" * 78)
+    print("CLASSIFICAÇÃO DA DESCOBERTA")
+    print("=" * 78)
+
+    print(
+        f"Encontrados pelo Jira.........: "
+        f"{len(issues)}"
+    )
+
+    print(
+        f"Cancelados ignorados..........: "
+        f"{len(cancelled)}"
+    )
+
+    print(
+        f"Finalizados elegíveis.........: "
+        f"{len(eligible)}"
+    )
+
+    print(
+        f"Já existentes no GLPI.........: "
+        f"{len(already_migrated)}"
+    )
+
+    print(
+        f"Novos para migração...........: "
+        f"{len(new_issues)}"
+    )
+
+    print(
+        f"Selecionados nesta execução...: "
+        f"{len(filtered)}"
+    )
+    
     for n, issue in enumerate(selected, 1):
         fields = issue.get("fields") or {}; status = (fields.get("status") or {}).get("name") or ""
         print(f"{n:03d}. {issue.get('key')} | {status} | {fields.get('summary') or ''}")
