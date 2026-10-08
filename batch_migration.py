@@ -119,10 +119,24 @@ def ticket_already_migrated(
     if not state:
         return False
 
+    completion = state.get(
+        "migration_complete"
+    )
+
+    # Novo padrão:
+    # falhou parcialmente -> deve tentar novamente
+    if completion is False:
+        return False
+
+    # Novo padrão:
+    # terminou completamente
+    if completion is True:
+        return True
+
+    # Compatibilidade com states antigos recuperados
+    # e migrações anteriores à criação deste campo.
     return bool(
-        state.get(
-            "glpi_ticket_id"
-        )
+        state.get("glpi_ticket_id")
     )
 
 def load_ticket_state(jira_key: str) -> dict[str, Any]:
