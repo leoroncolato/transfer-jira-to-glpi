@@ -45,8 +45,6 @@ JIRA_BASE = require_env("JIRA_BASE_URL").rstrip("/")
 JIRA_EMAIL = require_env("JIRA_EMAIL")
 JIRA_TOKEN = require_env("JIRA_API_TOKEN")
 JIRA_KEY = require_env("JIRA_ISSUE_KEY")
-JIRA_SECTOR_FIELD_ID = "customfield_10154"
-JIRA_BRANCH_FIELD_ID = "customfield_10119"
 
 GLPI_BASE = require_env("GLPI_BASE_URL").rstrip("/")
 GLPI_REST_API = os.environ.get(
@@ -64,19 +62,39 @@ GLPI_JIRA_USER_ID = int(require_env("GLPI_JIRA_USER_ID"))
 GLPI_TARGET_TICKET_ID = optional_int_env("GLPI_TARGET_TICKET_ID")
 
 DRY_RUN = os.environ.get("DRY_RUN", "1").strip() == "1"
+DEBUG_FIELDS = os.environ.get("DEBUG_FIELDS", "0").strip() == "1"
+FORCE_REPROCESS_EXISTING = (
+    os.environ.get("FORCE_REPROCESS_EXISTING", "0").strip() == "1"
+)
+
+JIRA_SECTOR_FIELD_ID = os.environ.get(
+    "JIRA_SECTOR_FIELD_ID", "customfield_10154"
+).strip()
+JIRA_BRANCH_FIELD_ID = os.environ.get(
+    "JIRA_BRANCH_FIELD_ID", "customfield_10119"
+).strip()
+
+MIGRATION_SCOPE = os.environ.get("MIGRATION_SCOPE", "done").strip().casefold()
+DONE_STATUSES = {
+    "resolvido", "fechado", "concluido", "concluida",
+    "solucionado", "encerrado",
+}
+ACTIVE_STATUSES = {
+    "aberto", "novo", "aguardando cliente", "em andamento",
+    "itens pendentes", "aguardando pelo suporte", "pendente",
+}
+if MIGRATION_SCOPE == "done":
+    ALLOWED_STATUSES = DONE_STATUSES
+elif MIGRATION_SCOPE == "active":
+    ALLOWED_STATUSES = ACTIVE_STATUSES
+elif MIGRATION_SCOPE == "all":
+    ALLOWED_STATUSES = DONE_STATUSES | ACTIVE_STATUSES
+else:
+    raise RuntimeError("MIGRATION_SCOPE deve ser 'done', 'active' ou 'all'.")
 
 REQUEST_TIMEOUT = 60
 DOWNLOAD_TIMEOUT = 120
 SESSION_TIMEOUT = 30
-
-ALLOWED_STATUSES = {
-    "aguardando cliente",
-    "em andamento",
-    "itens pendentes",
-    "resolvido",
-    "fechado",
-    "concluida"
-}
 
 GLPI_PRIORITY_MAP = {
     "baixa": 2,
@@ -101,8 +119,9 @@ GLPI_STATUS_MAP = {
     "pendente": 4,
 
     "resolvido": 5,
-    "solucionado": 5,
+    "concluido": 5,
     "concluida": 5,
+    "solucionado": 5,
 
     "fechado": 6,
     "encerrado": 6,
@@ -332,19 +351,11 @@ def jira_get_json(
 
 
 def get_jira_issue(session: Session) -> dict[str, Any]:
-    """Lê os campos principais e metadados internos do chamado."""
-
+    """Lê os campos principais e os campos corporativos do chamado."""
     requested_fields = [
-        "summary",
-        "description",
-        "attachment",
-        "status",
-        "priority",
-        "created",
-        JIRA_SECTOR_FIELD_ID,
-        JIRA_BRANCH_FIELD_ID,
+        "summary", "description", "attachment", "status",
+        "priority", "created", JIRA_SECTOR_FIELD_ID, JIRA_BRANCH_FIELD_ID,
     ]
-
     issue = jira_get_json(
         session,
         f"/rest/api/3/issue/{JIRA_KEY}",
@@ -353,11 +364,8 @@ def get_jira_issue(session: Session) -> dict[str, Any]:
             "expand": "renderedFields",
         },
     )
-
     save_json(JIRA_JSON_FILE, issue)
     return issue
-
-
 
 def request_field_value_to_text(value: Any) -> str:
     """
@@ -1165,7 +1173,17 @@ def import_jira_comments(
 
 
 def main() -> int:
-    """Executa a migração piloto."""
+    """Executa a migração de um chamado Jira -> GLPI."""
+    state = load_state()
+
+    if state.get("recovered_existing") and not FORCE_REPROCESS_EXISTING:
+        section("CHAMADO JÁ EXISTE NO GLPI - RECUPERADO")
+        print(f"Jira........: {JIRA_KEY}")
+        print(f"GLPI........: {state.get('glpi_ticket_id')}")
+        print("Ação........: SKIP integral para evitar duplicidade.")
+        print('Para reprocessar conscientemente, defina FORCE_REPROCESS_EXISTING="1".')
+        return 0
+
     section("1. LENDO CHAMADO DO JIRA")
 
     jira_session = build_jira_session()
@@ -1188,23 +1206,13 @@ def main() -> int:
         request_type_name = request_info["request_type_name"]
         reporter_name = request_info["reporter_name"]
         reporter_email = request_info["reporter_email"]
-        sector_raw = fields.get(
-            JIRA_SECTOR_FIELD_ID
-        )
-        branch_raw = fields.get(
-            JIRA_BRANCH_FIELD_ID
-        )
-        sector = request_field_value_to_text(
-            sector_raw
-        )
-        branch = request_field_value_to_text(
-            branch_raw
-        )
-        # Fallback para chamados em que eventualmente esses dados
-        # apareçam no formulário do JSM em vez dos campos internos.
+
+        sector_raw = fields.get(JIRA_SECTOR_FIELD_ID)
+        branch_raw = fields.get(JIRA_BRANCH_FIELD_ID)
+        sector = request_field_value_to_text(sector_raw)
+        branch = request_field_value_to_text(branch_raw)
         if not sector:
             sector = request_info.get("sector", "")
-
         if not branch:
             branch = request_info.get("branch", "")
 
@@ -1233,8 +1241,10 @@ def main() -> int:
         print(f"Requerente..: {reporter_name}")
         print(f"E-mail......: {reporter_email}")
         print(f"Comentários.: {len(comments)}")
-        print(f"RAW Setor...: {sector_raw!r}")#temporario--------------------------------------------------------------------
-        print(f"RAW Filial..: {branch_raw!r}")#temporario--------------------------------------------------------------------
+        if DEBUG_FIELDS:
+            print(f"RAW Setor...: {sector_raw!r}")
+            print(f"RAW Filial..: {branch_raw!r}")
+
         print(
             f"Setor.......: "
             f"{sector or 'Não informado'}"
@@ -1244,6 +1254,7 @@ def main() -> int:
             f"Filial......: "
             f"{branch or 'Não informado'}"
         )
+
         print(
             f"Abertura....: "
             f"{jira_created_formatted}"
@@ -1266,8 +1277,6 @@ def main() -> int:
         section("DRY-RUN CONCLUÍDO")
         print("Nenhum dado foi gravado no GLPI.")
         return 0
-
-    state = load_state()
 
     section("4. AUTENTICANDO NO GLPI")
     glpi_session = init_glpi_session()
