@@ -1,2 +1,21 @@
-.venv/*
-pilot_data/*
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Secrets
+.env
+set-env.ps1
+scripts/set-env.ps1
+
+# Migration runtime data
+pilot_data/
+batch_results/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
