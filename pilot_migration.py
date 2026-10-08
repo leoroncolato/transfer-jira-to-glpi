@@ -73,6 +73,12 @@ JIRA_SECTOR_FIELD_ID = os.environ.get(
 JIRA_BRANCH_FIELD_ID = os.environ.get(
     "JIRA_BRANCH_FIELD_ID", "customfield_10119"
 ).strip()
+# Um tipo de issue Jira nao e necessariamente a categoria ITIL do GLPI.
+# Para requests sem tipo JSM valido, o operador deve definir um nome de
+# categoria existente de forma explicita antes de permitir escrita.
+GLPI_CATEGORY_FALLBACK_NAME = os.environ.get(
+    "GLPI_CATEGORY_FALLBACK_NAME", ""
+).strip()
 
 MIGRATION_SCOPE = os.environ.get("MIGRATION_SCOPE", "done").strip().casefold()
 DONE_STATUSES = {
@@ -157,7 +163,8 @@ EMAIL_QUOTE_PATTERNS = [
     ),
 ]
 
-WORKDIR = Path("pilot_data") / JIRA_KEY
+ROOT = Path(__file__).resolve().parent
+WORKDIR = ROOT / "pilot_data" / JIRA_KEY
 ATTACHMENTS_DIR = WORKDIR / "attachments"
 STATE_FILE = WORKDIR / "state.json"
 JIRA_JSON_FILE = WORKDIR / "jira_issue.json"
@@ -296,8 +303,16 @@ def load_state() -> dict[str, Any]:
     if not STATE_FILE.exists():
         return default_state()
 
-    with STATE_FILE.open("r", encoding="utf-8") as file_handle:
-        state = json.load(file_handle)
+    try:
+        with STATE_FILE.open("r", encoding="utf-8-sig") as file_handle:
+            state = json.load(file_handle)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"Impossível ler {STATE_FILE}; operação interrompida para evitar duplicidades."
+        ) from exc
+
+    if not isinstance(state, dict):
+        raise RuntimeError(f"Estado inválido em {STATE_FILE}: esperado objeto JSON.")
 
     if state.get("jira_key") not in {None, JIRA_KEY}:
         raise RuntimeError(
@@ -311,7 +326,26 @@ def load_state() -> dict[str, Any]:
     state.setdefault("glpi_ticket_id", None)
     state.setdefault("skipped_comments", {})
 
+    for field in ("uploaded_attachments", "imported_comments", "skipped_comments"):
+        if not isinstance(state[field], dict):
+            raise RuntimeError(f"Estado inválido: '{field}' deve ser objeto JSON em {STATE_FILE}.")
+
+    existing_id = state["glpi_ticket_id"]
+    if existing_id not in (None, ""):
+        try:
+            existing_id = int(existing_id)
+            if existing_id <= 0:
+                raise ValueError("ID deve ser positivo")
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"ID GLPI inválido em {STATE_FILE}.") from exc
+        state["glpi_ticket_id"] = existing_id
+
     if GLPI_TARGET_TICKET_ID is not None:
+        if existing_id not in (None, "", GLPI_TARGET_TICKET_ID):
+            raise RuntimeError(
+                "GLPI_TARGET_TICKET_ID difere do ID salvo no estado. "
+                "Corrija a configuração; não sobrescreva automaticamente."
+            )
         state["glpi_ticket_id"] = GLPI_TARGET_TICKET_ID
 
     return state
@@ -354,7 +388,8 @@ def get_jira_issue(session: Session) -> dict[str, Any]:
     """Lê os campos principais e os campos corporativos do chamado."""
     requested_fields = [
         "summary", "description", "attachment", "status",
-        "priority", "created", JIRA_SECTOR_FIELD_ID, JIRA_BRANCH_FIELD_ID,
+        "priority", "created", "reporter", "issuetype",
+        JIRA_SECTOR_FIELD_ID, JIRA_BRANCH_FIELD_ID,
     ]
     issue = jira_get_json(
         session,
@@ -441,12 +476,53 @@ def get_request_field(
 
     return ""
 
-def get_jira_request_info(session: Session) -> dict[str, str]:
-    """Lê tipo da solicitação e requerente no Jira Service Management."""
-    request_data = jira_get_json(
-        session,
-        f"/rest/servicedeskapi/request/{JIRA_KEY}",
-    )
+def get_jira_request_info(session: Session, issue: dict[str, Any]) -> dict[str, Any]:
+    """Obtem metadados JSM ou recua de modo controlado para a API Jira.
+
+    Apenas vpOriginMissing permite fallback. Outro 404, 401 ou 403
+    continua sendo erro, pois pode significar falta de permissao.
+    """
+    path = f"/rest/servicedeskapi/request/{JIRA_KEY}"
+    response = session.get(f"{JIRA_BASE}{path}", timeout=REQUEST_TIMEOUT)
+    if not response.ok:
+        try:
+            error_data = response.json()
+        except ValueError:
+            error_data = {}
+        error_key = (error_data.get("i18nErrorMessage") or {}).get("i18nKey") if isinstance(error_data, dict) else ""
+        if response.status_code == 404 and error_key == "sd.customerview.error.vpOriginMissing":
+            fields = issue.get("fields") or {}
+            reporter = fields.get("reporter") or {}
+            issue_type = fields.get("issuetype") or {}
+            type_name = str(issue_type.get("name") or "").strip()
+            if not type_name:
+                raise RuntimeError(
+                    "JSM nao disponibiliza Request Type e a issue Jira nao contem issuetype. "
+                    "Revisao manual necessaria."
+                )
+            print(
+                "AVISO JIRA: request sem origem valida no JSM (vpOriginMissing). "
+                "Pode ser Request Type removido/invalido ou acesso restrito."
+            )
+            print(
+                "FALLBACK: preservando metadados pelo endpoint de issue do Jira. "
+                "Tipo de issue nao sera equiparado automaticamente a categoria GLPI."
+            )
+            return {
+                "service_desk_id": "",
+                "request_type_id": "",
+                "request_type_name": type_name,
+                "request_type_source": "issuetype (fallback; tipo JSM indisponivel)",
+                "jsm_request_available": False,
+                "reporter_account_id": reporter.get("accountId") or "",
+                "reporter_name": reporter.get("displayName") or "",
+                "reporter_email": reporter.get("emailAddress") or "",
+                "sector": "",
+                "branch": "",
+            }
+        check_response(response, path, "JIRA")
+
+    request_data = response.json()
     sector = get_request_field(
         request_data,
         "Setor",
@@ -474,6 +550,8 @@ def get_jira_request_info(session: Session) -> dict[str, str]:
         "service_desk_id": service_desk_id,
         "request_type_id": request_type_id,
         "request_type_name": request_type.get("name") or "",
+        "request_type_source": "Jira Service Management",
+        "jsm_request_available": True,
         "reporter_account_id": reporter.get("accountId") or "",
         "reporter_name": reporter.get("displayName") or "",
         "reporter_email": reporter.get("emailAddress") or "",
@@ -482,8 +560,60 @@ def get_jira_request_info(session: Session) -> dict[str, str]:
     }
 
 
-def get_jira_comments(session: Session) -> list[dict[str, Any]]:
-    """Lê todos os comentários do chamado com paginação."""
+def jira_platform_comment_visibility(comment: dict[str, Any]) -> tuple[bool, bool]:
+    """Retorna (publico, confirmado); ausencia de evidencias -> privado."""
+    for name in ("jsdPublic", "public"):
+        if type(comment.get(name)) is bool:
+            return comment[name], True
+
+    for prop in comment.get("properties") or []:
+        if not isinstance(prop, dict) or prop.get("key") != "sd.public.comment":
+            continue
+        value = prop.get("value") or {}
+        if isinstance(value, dict) and type(value.get("internal")) is bool:
+            return not value["internal"], True
+    return False, False
+
+
+def get_jira_comments(session: Session, *, jsm_request_available: bool = True) -> list[dict[str, Any]]:
+    """Obtem comentarios, com fallback para a API Jira e visibilidade segura."""
+    if not jsm_request_available:
+        comments: list[dict[str, Any]] = []
+        start = 0
+        limit = 100
+        while True:
+            page = jira_get_json(
+                session,
+                f"/rest/api/3/issue/{JIRA_KEY}/comment",
+                params={"startAt": start, "maxResults": limit, "expand": "properties"},
+            )
+            values = page.get("comments") or []
+            if not isinstance(values, list):
+                raise RuntimeError("Comentarios Jira retornaram estrutura inesperada.")
+            for raw_comment in values:
+                comment = dict(raw_comment)
+                is_public, verified = jira_platform_comment_visibility(comment)
+                comment["public"] = is_public
+                comment["visibility_unverified"] = not verified
+                comments.append(comment)
+            start += len(values)
+            if not values:
+                break
+            total = page.get("total")
+            if total is not None:
+                if start >= int(total):
+                    break
+            elif len(values) < limit:
+                break
+        unverified = sum(bool(c.get("visibility_unverified")) for c in comments)
+        print(
+            f"AVISO: comentarios via API Jira: {len(comments)}; "
+            f"visibilidade nao confirmada: {unverified}. "
+            "Nao confirmados serao PRIVADOS no GLPI."
+        )
+        return comments
+
+    """Lê todos os comentários JSM do chamado com paginação."""
     comments: list[dict[str, Any]] = []
     start = 0
     limit = 100
@@ -665,6 +795,9 @@ def build_glpi_description(
     jira_created: str,
     sector: str,
     branch: str,
+    *,
+    jira_type_name: str = "",
+    jira_type_source: str = "",
 ) -> str:
     """Monta o cabeçalho histórico do Jira no GLPI."""
 
@@ -700,7 +833,11 @@ def build_glpi_description(
         f"{escape(sector_display)}<br>"
 
         f"<strong>Filial:</strong> "
-        f"{escape(branch_display)}"
+        f"{escape(branch_display)}<br>"
+
+        f"<strong>Tipo no Jira:</strong> "
+        f"{escape(jira_type_name or 'Nao informado')} "
+        f"({escape(jira_type_source or 'Origem nao informada')})"
         "</p>"
 
         "<hr>"
@@ -825,6 +962,89 @@ def glpi_request(
     )
     check_response(response, operation, "GLPI")
     return response
+
+
+def find_glpi_ticket_by_jira_key(session: Session) -> int | None:
+    """Pesquisa externalid na API legada e confirma correspondência EXATA.
+
+    A busca é obrigatória antes de criar um ticket. Se falhar, não criamos.
+    """
+    response = glpi_request(
+        session,
+        "GET",
+        "Ticket/",
+        f"pesquisa preventiva do ticket Jira {JIRA_KEY}",
+        api_base=GLPI_REST_API,
+        params={
+            "searchText[externalid]": JIRA_KEY,
+            "range": "0-99",
+            "get_hateoas": "false",
+        },
+        timeout=REQUEST_TIMEOUT,
+    )
+    candidates = response.json()
+    if not isinstance(candidates, list) or any(not isinstance(row, dict) for row in candidates):
+        raise RuntimeError(
+            "Busca de duplicidades retornou formato inesperado/erro da API GLPI. "
+            "Criação bloqueada por segurança."
+        )
+    if len(candidates) >= 100:
+        raise RuntimeError(
+            "Busca de externalid retornou 100 registros: resultado pode estar truncado. "
+            "Verifique manualmente antes de continuar."
+        )
+    matching = [
+        ticket for ticket in candidates
+        if isinstance(ticket, dict)
+        and str(ticket.get("externalid") or "").strip().upper() == JIRA_KEY.upper()
+    ]
+    if len(matching) > 1:
+        raise RuntimeError(
+            f"Já há {len(matching)} tickets com externalid={JIRA_KEY} no GLPI. "
+            "Revisão manual obrigatória."
+        )
+    if not matching:
+        return None
+    try:
+        ticket_id = int(matching[0]["id"])
+        if ticket_id <= 0:
+            raise ValueError("ID inválido")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("Busca GLPI retornou ticket com ID inválido.") from exc
+    return ticket_id
+
+
+def assert_state_ticket_matches_jira(session: Session, ticket_id: int) -> None:
+    """Impede PUT em ticket diferente caso um state.json esteja incorreto."""
+    response = glpi_request(
+        session,
+        "GET",
+        f"Ticket/{ticket_id}",
+        f"validação do vínculo Jira/GLPI para ticket {ticket_id}",
+        api_base=GLPI_REST_API,
+        params={"get_hateoas": "false"},
+        timeout=REQUEST_TIMEOUT,
+    )
+    ticket = response.json()
+    if not isinstance(ticket, dict) or int(ticket.get("id") or 0) != ticket_id:
+        raise RuntimeError(f"O GLPI não confirmou a identidade do ticket {ticket_id}.")
+    if int(ticket.get("is_deleted") or 0) != 0:
+        raise RuntimeError(f"O ticket GLPI {ticket_id} está na lixeira.")
+
+    ext_id = str(ticket.get("externalid") or "").strip().upper()
+    content = str(ticket.get("content") or "")
+    historical_marker = re.search(
+        r"Importado do Jira:\s*</strong>\s*"
+        + re.escape(JIRA_KEY)
+        + r"(?=<|\s|$)",
+        content,
+        flags=re.IGNORECASE,
+    )
+    if ext_id != JIRA_KEY.upper() and not (not ext_id and historical_marker):
+        raise RuntimeError(
+            f"O ticket GLPI {ticket_id} não comprova vínculo com Jira {JIRA_KEY}. "
+            "Operação bloqueada para não alterar um chamado incorreto."
+        )
 
 
 def resolve_glpi_category_id(session: Session, category_name: str) -> int:
@@ -1066,8 +1286,22 @@ def enforce_glpi_ticket_status(
         timeout=REQUEST_TIMEOUT,
     )
 
+    check = glpi_request(
+        session,
+        "GET",
+        f"Ticket/{ticket_id}",
+        f"confirmação do status do ticket {ticket_id}",
+        api_base=GLPI_REST_API,
+        params={"get_hateoas": "false"},
+        timeout=REQUEST_TIMEOUT,
+    ).json()
+    if not isinstance(check, dict) or int(check.get("status") or 0) != status_id:
+        raise RuntimeError(
+            f"Ticket GLPI {ticket_id} não confirmou status esperado {status_id}. "
+            f"Retornado: {check.get('status') if isinstance(check, dict) else check!r}"
+        )
     print(
-        f"Status final.: GLPI {status_id} "
+        f"Status final confirmado: GLPI {status_id} "
         f"({GLPI_STATUS_LABELS[status_id]})"
     )
 
@@ -1118,7 +1352,11 @@ def import_jira_comments(
         else:
             original_date = str(created)
 
-        visibility = "Público" if is_public else "Interno / privado"
+        visibility = (
+            "Nao confirmada no Jira (importado como PRIVADO)"
+            if comment.get("visibility_unverified")
+            else ("Público" if is_public else "Interno / privado")
+        )
         original_body = jira_comment_body_to_html(comment)
         if not original_body.strip():
             skipped[jira_comment_id] = "vazio após limpeza / somente anexos"
@@ -1175,15 +1413,6 @@ def import_jira_comments(
 def main() -> int:
     """Executa a migração de um chamado Jira -> GLPI."""
     state = load_state()
-
-    if state.get("recovered_existing") and not FORCE_REPROCESS_EXISTING:
-        section("CHAMADO JÁ EXISTE NO GLPI - RECUPERADO")
-        print(f"Jira........: {JIRA_KEY}")
-        print(f"GLPI........: {state.get('glpi_ticket_id')}")
-        print("Ação........: SKIP integral para evitar duplicidade.")
-        print('Para reprocessar conscientemente, defina FORCE_REPROCESS_EXISTING="1".')
-        return 0
-
     section("1. LENDO CHAMADO DO JIRA")
 
     jira_session = build_jira_session()
@@ -1202,7 +1431,7 @@ def main() -> int:
         )
         description_html = get_jira_description_html(issue)
 
-        request_info = get_jira_request_info(jira_session)
+        request_info = get_jira_request_info(jira_session, issue)
         request_type_name = request_info["request_type_name"]
         reporter_name = request_info["reporter_name"]
         reporter_email = request_info["reporter_email"]
@@ -1216,7 +1445,10 @@ def main() -> int:
         if not branch:
             branch = request_info.get("branch", "")
 
-        comments = get_jira_comments(jira_session)
+        comments = get_jira_comments(
+            jira_session,
+            jsm_request_available=request_info["jsm_request_available"],
+        )
         save_json(JIRA_COMMENTS_FILE, comments)
 
         validate_jira_status(status)
@@ -1228,7 +1460,25 @@ def main() -> int:
             jira_created_formatted,
             sector,
             branch,
+            jira_type_name=request_type_name,
+            jira_type_source=request_info["request_type_source"],
         )
+
+        # Confirma mapeamento antes de baixar arquivos ou acessar o GLPI.
+        resolved_priority = resolve_glpi_priority(jira_priority_name)
+        resolved_status = resolve_glpi_status(status)
+
+        if not request_info["jsm_request_available"]:
+            if GLPI_CATEGORY_FALLBACK_NAME:
+                print(f"Categoria GLPI fallback explicitada: {GLPI_CATEGORY_FALLBACK_NAME}")
+            elif not DRY_RUN:
+                raise RuntimeError(
+                    "Request Type do JSM indisponivel. Antes de migrar de verdade, "
+                    "defina GLPI_CATEGORY_FALLBACK_NAME com uma categoria ITIL "
+                    "existente e revisada do GLPI."
+                )
+            else:
+                print("AVISO: para migracao real, defina GLPI_CATEGORY_FALLBACK_NAME.")
 
         print(f"Jira........: {JIRA_KEY}")
         print(f"Abertura Jira: {jira_created_formatted}")
@@ -1238,6 +1488,7 @@ def main() -> int:
         print(f"Descrição...: {len(description_html)} caracteres")
         print(f"Prioridade..: {jira_priority_name}")
         print(f"Tipo Jira...: {request_type_name}")
+        print(f"Tipo origem.: {request_info['request_type_source']}")
         print(f"Requerente..: {reporter_name}")
         print(f"E-mail......: {reporter_email}")
         print(f"Comentários.: {len(comments)}")
@@ -1282,14 +1533,45 @@ def main() -> int:
     glpi_session = init_glpi_session()
 
     try:
-        section("5. RESOLVENDO METADADOS E SINCRONIZANDO TICKET")
+        section("5. VERIFICANDO IDENTIDADE E DUPLICIDADES")
+        # Mesmo com estado local, confirmar o ID existente antes de qualquer PUT.
+        jira_existing_id = find_glpi_ticket_by_jira_key(glpi_session)
+        saved_id = state.get("glpi_ticket_id")
+        if saved_id:
+            assert_state_ticket_matches_jira(glpi_session, int(saved_id))
+            if jira_existing_id is not None and jira_existing_id != int(saved_id):
+                raise RuntimeError(
+                    f"Conflito: estado local aponta GLPI {saved_id}, mas "
+                    f"externalid={JIRA_KEY} aponta GLPI {jira_existing_id}."
+                )
+            if state.get("recovered_existing") and not FORCE_REPROCESS_EXISTING:
+                print(f"SKIP: chamado recuperado anteriormente no GLPI #{saved_id}.")
+                return 0
+            print(f"Retomando ticket GLPI #{saved_id} (estado local validado).")
+        elif jira_existing_id is not None:
+            # Ticket criado antes e estado perdido; não importar anexos/comentários
+            # sem os IDs anteriores, pois pode duplicá-los.
+            state["glpi_ticket_id"] = jira_existing_id
+            state["recovered_existing"] = True
+            save_state(state)
+            print(
+                f"SKIP: Jira {JIRA_KEY} já existe no GLPI #{jira_existing_id}. "
+                "ID recuperado e salvo em state.json; nenhum dado duplicado."
+            )
+            return 0
+        else:
+            print("Não foi localizado ticket com externalid correspondente no GLPI.")
+            print("ATENÇÃO: a pesquisa não detecta registros antigos sem externalid.")
+
+        section("6. RESOLVENDO METADADOS E SINCRONIZANDO TICKET")
 
         category_id = resolve_glpi_category_id(
             glpi_session,
-            request_type_name,
+            request_type_name if request_info["jsm_request_available"]
+            else GLPI_CATEGORY_FALLBACK_NAME,
         )
-        priority = resolve_glpi_priority(jira_priority_name)
-        glpi_status = resolve_glpi_status(status)
+        priority = resolved_priority
+        glpi_status = resolved_status
 
         print(f"Categoria...: {request_type_name} -> GLPI {category_id}")
         print(f"Prioridade..: {jira_priority_name} -> GLPI {priority}")
