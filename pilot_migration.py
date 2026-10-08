@@ -80,6 +80,11 @@ GLPI_CATEGORY_FALLBACK_NAME = os.environ.get(
     "GLPI_CATEGORY_FALLBACK_NAME", ""
 ).strip()
 
+GLPI_EMAILED_REQUEST_CATEGORY_NAME = os.environ.get(
+    "GLPI_EMAILED_REQUEST_CATEGORY_NAME",
+    "",
+).strip()
+
 MIGRATION_SCOPE = os.environ.get("MIGRATION_SCOPE", "done").strip().casefold()
 DONE_STATUSES = {
     "resolvido", "fechado", "concluido", "concluida",
@@ -194,6 +199,40 @@ def normalize_text(value: Any) -> str:
     normalized = unicodedata.normalize("NFKD", text)
     return "".join(char for char in normalized if not unicodedata.combining(char))
 
+def resolve_glpi_category_name(
+    request_type_name: str,
+    jsm_request_available: bool,
+) -> str:
+    """
+    Decide qual nome de categoria ITIL do GLPI deve ser utilizado.
+    """
+
+    request_type_key = normalize_text(
+        request_type_name
+    )
+
+    # Requests criados por e-mail no Jira possuem um tipo técnico
+    # "Emailed request", que não representa uma categoria de negócio.
+    if request_type_key == "emailed request":
+        if not GLPI_EMAILED_REQUEST_CATEGORY_NAME:
+            raise RuntimeError(
+                "Request Type Jira 'Emailed request' exige "
+                "GLPI_EMAILED_REQUEST_CATEGORY_NAME."
+            )
+
+        return GLPI_EMAILED_REQUEST_CATEGORY_NAME
+
+    # Requests que perderam a origem JSM usam o fallback histórico.
+    if not jsm_request_available:
+        if not GLPI_CATEGORY_FALLBACK_NAME:
+            raise RuntimeError(
+                "Request Type JSM indisponível e "
+                "GLPI_CATEGORY_FALLBACK_NAME não definido."
+            )
+
+        return GLPI_CATEGORY_FALLBACK_NAME
+
+    return request_type_name
 
 def response_preview(response: Response, limit: int = 3000) -> str:
     """Retorna uma amostra segura da resposta HTTP."""
@@ -1455,6 +1494,11 @@ def main() -> int:
 
         validate_jira_status(status)
 
+        category_name_for_glpi = resolve_glpi_category_name(
+            request_type_name,
+            request_info["jsm_request_available"],
+        )
+
         description_for_glpi = build_glpi_description(
             description_html,
             reporter_name,
@@ -1569,13 +1613,17 @@ def main() -> int:
 
         category_id = resolve_glpi_category_id(
             glpi_session,
-            request_type_name if request_info["jsm_request_available"]
-            else GLPI_CATEGORY_FALLBACK_NAME,
+            category_name_for_glpi,
         )
+
         priority = resolved_priority
         glpi_status = resolved_status
 
-        print(f"Categoria...: {request_type_name} -> GLPI {category_id}")
+        print(
+            f"Categoria...: "
+            f"{request_type_name} -> "
+            f"{category_name_for_glpi} -> "
+            f"GLPI {category_id}")
         print(f"Prioridade..: {jira_priority_name} -> GLPI {priority}")
         print(
             f"Status......: {status} -> "

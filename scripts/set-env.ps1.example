@@ -40,6 +40,9 @@ $env:GLPI_JIRA_USER_ID=""
 
 $env:GLPI_CATEGORY_FALLBACK_NAME="Importacao Jira - Sem tipo JSM"
 
+# Categoria usada para tickets históricos originados por e-mail no Jira.
+$env:GLPI_EMAILED_REQUEST_CATEGORY_NAME="Importacao Jira - Email"
+
 Remove-Item Env:\GLPI_TARGET_TICKET_ID -ErrorAction SilentlyContinue
 
 # ============================================================
