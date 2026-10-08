@@ -1,0 +1,77 @@
+# ============================================================
+# JIRA
+# ============================================================
+
+$env:JIRA_BASE_URL="https://.atlassian.net"
+
+$env:JIRA_EMAIL=""
+
+$env:JIRA_API_TOKEN=""
+
+# Utilizada pelo pilot_migration.py
+$env:JIRA_ISSUE_KEY="TAREFA-603"
+
+$env:MIGRATION_SCOPE="done"
+
+$env:JIRA_SECTOR_FIELD_ID="customfield_10154"
+
+$env:JIRA_BRANCH_FIELD_ID="customfield_10119"
+
+# ============================================================
+# GLPI
+# ============================================================
+
+$env:GLPI_BASE_URL="http://"
+
+$env:GLPI_REST_API_BASE_URL="$env:GLPI_BASE_URL/apirest.php"
+
+$env:GLPI_V1_API_BASE_URL="$env:GLPI_BASE_URL/api.php/v1"
+
+$env:GLPI_APP_TOKEN=""
+
+$env:GLPI_USER_TOKEN=""
+
+
+# Entidade raiz Sistemma
+$env:GLPI_ENTITY_ID="0"
+
+# Usuário técnico "jira"
+$env:GLPI_JIRA_USER_ID=""
+
+Remove-Item Env:\GLPI_TARGET_TICKET_ID -ErrorAction SilentlyContinue
+
+# ============================================================
+# EXECUÇÃO
+# ============================================================
+
+# 1 = não grava no GLPI
+# 0 = grava
+$env:DRY_RUN="1"
+
+$env:DEBUG_FIELDS="0"
+
+$env:FORCE_REPROCESS_EXISTING="0"
+
+# ============================================================
+# BATCH
+# ============================================================
+
+$env:BATCH_DISCOVERY_ONLY="1"
+
+# 0 = sem limite
+$env:BATCH_LIMIT="0"
+
+$env:BATCH_STOP_ON_ERROR="0"
+
+$env:BATCH_EXCLUDE_KEYS=""
+
+# Necessário quando DRY_RUN=0
+$env:BATCH_CONFIRM=""
+
+$env:BATCH_ONLY_NEW="1"
+
+Remove-Item Env:\BATCH_JQL -ErrorAction SilentlyContinue
+
+# RECOVERY
+$env:RECOVERY_OVERWRITE="0"
+$env:RECOVERY_PAGE_SIZE="200"
