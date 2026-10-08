@@ -295,6 +295,7 @@ def default_state() -> dict[str, Any]:
         "uploaded_attachments": {},
         "imported_comments": {},
         "skipped_comments": {},
+        "migration_complete": False,
     }
 
 
@@ -325,6 +326,7 @@ def load_state() -> dict[str, Any]:
     state.setdefault("imported_comments", {})
     state.setdefault("glpi_ticket_id", None)
     state.setdefault("skipped_comments", {})
+    state.setdefault("migration_complete", None)
 
     for field in ("uploaded_attachments", "imported_comments", "skipped_comments"):
         if not isinstance(state[field], dict):
@@ -1615,6 +1617,15 @@ def main() -> int:
             ticket_id,
             glpi_status,
         )
+
+        state["migration_complete"] = True
+        state["migration_completed_at"] = (
+            datetime.now()
+            .astimezone()
+            .isoformat(timespec="seconds")
+        )
+
+        save_state(state)
 
         section("PILOTO CONCLUÍDO")
         print(f"Jira........: {JIRA_KEY}")
