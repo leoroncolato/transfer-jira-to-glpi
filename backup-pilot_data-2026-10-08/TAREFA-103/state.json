@@ -1,9 +1,0 @@
-{
-  "jira_key": "TAREFA-103",
-  "glpi_ticket_id": 91,
-  "uploaded_attachments": {},
-  "imported_comments": {},
-  "skipped_comments": {},
-  "recovered_existing": true,
-  "recovery_note": "Estado reconstruído a partir do GLPI após perda do pilot_data. O migrador deve fazer SKIP integral por padrão para evitar duplicações."
-}
